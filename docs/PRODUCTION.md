@@ -9,24 +9,29 @@ CI and Docker images
 
 Nginx reverse proxy
 
-- Example config: `deploy/nginx/app.conf`. It proxies `/api/` to the backend service and serves frontend static files via `try_files`.
+- Example config: `deploy/nginx/app.conf`. It serves the frontend static files and proxies `/api/` to the backend with response buffering off, so streamed replies reach the browser as they are generated.
 - In production, run Nginx in front of the backend and frontend. Configure TLS (Let's Encrypt or managed certificates) and redirect HTTP to HTTPS.
-- Example Docker pattern: Nginx serves static files and proxies `/api` to the backend container. Mount `uploads/` as a volume if serving uploaded files.
+- Any other proxy in front of the backend must also pass streamed responses through without buffering and allow long read timeouts (several minutes on CPU-only hosts).
+
+Local model server
+
+- The app needs no API keys: models run in Ollama. Keep the Ollama port private to the backend's network.
+- Size the host for the models: `qwen3:4b-instruct` needs about 4 GB of memory and `qwen3-vl:2b-instruct` about 3 GB. A GPU greatly reduces reply times.
+- Configure the models, context size and keep-alive with the `OLLAMA_*` variables in `.env.example`.
 
 Secrets management
 
-- Never store API keys in the repository. Use environment variables injected by your deployment platform or a secrets manager.
+- Keep `.env` out of the repository (it is git-ignored). Use environment variables injected by your deployment platform or a secrets manager for anything sensitive, such as a production `DATABASE_URL`.
 - GitHub Actions: store secrets under `Settings → Secrets and variables → Actions` and reference them as `${{ secrets.NAME }}`.
-- Cloud providers: use GCP Secret Manager, AWS Secrets Manager, or Azure Key Vault for production secrets.
 
 Observability and monitoring
 
 - Add structured logging and export logs to a centralized system (Cloud Logging, ELK, Datadog).
-- Export basic metrics: request latency, model latency, rate-limit hits, red-flag counts.
-- Configure alerting for model failures, high error rates, or repeated red-flag detections.
+- Export basic metrics: request latency, model latency, model failures, red-flag counts.
+- Poll `GET /api/status` to alert when Ollama is down or a model is missing.
 
 Security
 
 - Review the safety layer in `backend/services/safety.py` and `backend/services/redflag.py` before production.
-- Limit public access to the backend APIs; add authentication or IP allowlists where appropriate.
-- Secure uploaded files (don't serve sensitive uploads publicly without access controls).
+- Accounts use scrypt password hashes and expiring bearer tokens (`AUTH_TOKEN_DAYS`). Consider adding rate limiting on `/api/auth/login`.
+- Uploaded reports are processed in memory and never stored.

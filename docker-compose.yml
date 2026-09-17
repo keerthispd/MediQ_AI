@@ -1,20 +1,59 @@
-version: '3.8'
 services:
+  # Local language model server
+  ollama:
+    image: ollama/ollama:0.34.1
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # One-off job that downloads the models (only the first run takes long)
+  ollama-pull:
+    image: ollama/ollama:0.34.1
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b-instruct}
+      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-qwen3-vl:2b-instruct}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama pull \"$$OLLAMA_MODEL\" && ollama pull \"$$OLLAMA_VISION_MODEL\""]
+    restart: "no"
+
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     ports:
       - "8000:8000"
     volumes:
-      - ./uploads:/app/uploads
       - ./database:/app/database
     env_file:
-      - ./.env.example
+      - path: .env
+        required: false
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b-instruct}
+      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-qwen3-vl:2b-instruct}
+    depends_on:
+      ollama:
+        condition: service_healthy
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     ports:
-      - "3000:3000"
+      - "3000:80"
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  ollama-models:

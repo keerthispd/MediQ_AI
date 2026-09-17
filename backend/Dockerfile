@@ -1,18 +1,16 @@
+# Build from the repository root: docker build -f backend/Dockerfile .
 FROM python:3.11-slim
 WORKDIR /app
 
-# Install runtime deps
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates gcc && rm -rf /var/lib/apt/lists/*
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 # Copy requirements first for better caching
 COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install -r /app/requirements.txt
 
-# Copy app
-COPY . /app
-
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8000
+# Copy app (keeps the `backend.` package path the code imports from)
+COPY backend /app/backend
 
 EXPOSE 8000
 

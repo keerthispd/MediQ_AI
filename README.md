@@ -1,18 +1,19 @@
 # AI Medical Assistant Bot
 
-An AI-powered Medical Assistant built using **React**, **FastAPI**, **SQLite**, and **Google Gemini AI**. The application provides educational medical guidance, symptom triage, conversation history, safety filtering, red-flag detection, and medical report upload capabilities.
+An AI-powered Medical Assistant built using **React**, **FastAPI**, **SQLite**, and a **local language model** served by [Ollama](https://ollama.com). The application provides educational medical guidance, symptom triage, conversation history, safety filtering, red-flag detection, and medical report analysis. Everything runs on your own machine: no API keys, and conversations and reports never leave it.
 
 ---
 
 ## Features
 
-* AI-powered medical question answering using Gemini
+* Medical question answering with a local language model (Qwen3 4B Instruct by default)
+* Replies stream in as they are written, with follow-up questions understood in context
+* Medical report analysis for PDFs, text files, photos and scanned documents (read by a local vision model)
 * Symptom triage and educational guidance
 * Medical emergency red-flag detection
-* Safety filtering for harmful content
-* Conversation history storage using SQLite
-* Medical report upload support
-* Modern React-based user interface
+* Safety filtering with crisis-helpline responses
+* User accounts with private conversation history (SQLite)
+* Voice dictation, read-aloud and PDF export
 * FastAPI backend with REST APIs
 
 ---
@@ -31,10 +32,13 @@ An AI-powered Medical Assistant built using **React**, **FastAPI**, **SQLite**, 
 * SQLAlchemy
 * SQLite
 * Python
+* pypdfium2 and Pillow (document reading)
 
-### AI Integration
+### AI
 
-* Google Gemini 2.5 Flash
+* [Ollama](https://ollama.com) running locally
+* `qwen3:4b-instruct` for chat and report analysis
+* `qwen3-vl:2b-instruct` for reading photos and scanned PDFs
 
 ---
 
@@ -46,23 +50,40 @@ MedicalAssistant_bot/
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
+│   │   ├── api.js
 │   │   ├── App.jsx
 │   │   └── index.js
 │   └── package.json
 │
 ├── backend/
-│   ├── routes/
-│   ├── models/
-│   ├── services/
+│   ├── routes/          # API and auth endpoints
+│   ├── models/          # database models
+│   ├── services/        # local model, documents, auth, safety, red flags
 │   ├── utils/
 │   └── main.py
 │
-├── database/
-├── uploads/
+├── deploy/nginx/        # web server config for the Docker frontend
+├── database/            # SQLite database (created on first run)
 ├── docs/
+├── tests/
+├── docker-compose.yml
 ├── requirements.txt
 └── README.md
 ```
+
+---
+
+## Local Model Setup
+
+1. Install Ollama from https://ollama.com/download and make sure it is running.
+2. Download the models (about 4.5 GB in total):
+
+```bash
+ollama pull qwen3:4b-instruct
+ollama pull qwen3-vl:2b-instruct
+```
+
+A computer with 16 GB of RAM can run both on the CPU; a GPU makes replies much faster. To use other models, set `OLLAMA_MODEL` and `OLLAMA_VISION_MODEL` in `.env` (see `.env.example`). Prefer *instruct* models: "thinking" models spend a long time reasoning before they answer.
 
 ---
 
@@ -94,13 +115,9 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure Environment Variables
+### 4. Configure (optional)
 
-Create a `.env` file in the project root:
-
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-```
+The defaults work with a local Ollama install. To change them, copy `.env.example` to `.env` and edit it.
 
 ### 5. Start Backend Server
 
@@ -142,14 +159,38 @@ Frontend will run on:
 http://localhost:3000
 ```
 
+Create an account on the login screen, then start chatting. The header shows whether the local AI is ready.
+
+---
+
+## Running with Docker
+
+```bash
+docker compose up --build
+```
+
+This starts Ollama, downloads the models on the first run, and serves the app at http://localhost:3000. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for details.
+
 ---
 
 ## API Endpoints
 
-### Health Check
+All endpoints except health, status and login require an `Authorization: Bearer <token>` header.
+
+### Health and AI Status
 
 ```http
 GET /api/health
+GET /api/status
+```
+
+### Accounts
+
+```http
+POST /api/auth/register
+POST /api/auth/login
+POST /api/auth/logout
+GET  /api/auth/me
 ```
 
 ### Chat with Assistant
@@ -158,27 +199,41 @@ GET /api/health
 POST /api/chat
 ```
 
-### Upload Medical Report
+### Analyze Medical Report
 
 ```http
 POST /api/upload
 ```
 
+Chat and upload replies are streamed as newline-delimited JSON events (see `backend/routes/api.py`).
+
 ### Conversation History
 
 ```http
-GET /api/history
+GET    /api/history
+DELETE /api/history
 ```
+
+---
+
+## Running Tests
+
+```bash
+pytest -q
+```
+
+Tests use a temporary database and a fake model, so Ollama doesn't need to be running.
 
 ---
 
 ## Safety Features
 
 * Harmful-content filtering
-* Self-harm prevention responses
-* Medical emergency red-flag detection
+* Self-harm messages get crisis-helpline resources instead of a model reply
+* Emergency red-flag detection: a warning is always shown before the answer
 * Educational-use disclaimer
 * No direct diagnosis functionality
+* Uploaded reports are analyzed in memory and never stored
 
 ---
 
@@ -186,6 +241,7 @@ GET /api/history
 
 The application stores:
 
+* User accounts (passwords are hashed with scrypt)
 * User messages
 * Assistant responses
 * Red-flag information
@@ -199,29 +255,6 @@ SQLite
 
 ---
 
-## Running the Full Application
-
-Start Backend:
-
-```bash
-uvicorn backend.main:app --reload
-```
-
-Start Frontend:
-
-```bash
-cd frontend
-npm start
-```
-
-Open:
-
-```text
-http://localhost:3000
-```
-
----
-
 ## Disclaimer
 
 This application is intended for educational and informational purposes only. It does not provide professional medical advice, diagnosis, or treatment. Always consult a qualified healthcare professional for medical concerns.
@@ -230,9 +263,6 @@ This application is intended for educational and informational purposes only. It
 
 ## Future Enhancements
 
-* User authentication
-* PDF report analysis
-* Voice-based interaction
 * Multi-language support
 * Cloud deployment
 * Mobile application integration
@@ -241,4 +271,4 @@ This application is intended for educational and informational purposes only. It
 
 ## Author
 
-Developed as an AI-powered healthcare assistance project using React, FastAPI, SQLite, and Google Gemini AI.
+Developed as an AI-powered healthcare assistance project using React, FastAPI, SQLite, and local language models.

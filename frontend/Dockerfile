@@ -1,13 +1,13 @@
-FROM node:18-alpine as build
+# Build from the repository root: docker build -f frontend/Dockerfile .
+FROM node:22-alpine AS build
 WORKDIR /app
-COPY package.json package-lock.json* ./
+COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --silent
-COPY . .
+COPY frontend/ ./
 RUN npm run build
 
-FROM node:18-alpine
-WORKDIR /app
-RUN npm install -g serve
-COPY --from=build /app/build ./build
-EXPOSE 3000
-CMD ["serve", "-s", "build", "-l", "3000"]
+# Nginx serves the built app and proxies /api to the backend container
+FROM nginx:stable-alpine
+COPY deploy/nginx/app.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/build /usr/share/nginx/html
+EXPOSE 80

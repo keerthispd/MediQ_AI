@@ -1,29 +1,46 @@
+import logging
+import os
+from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 
-from backend.routes.api import router as api_router
-from backend.models.models import Base
-from backend.models.db import engine
+# Load .env before importing modules that read configuration at import time
+load_dotenv()
 
-app = FastAPI(title="AI Medical Assistant")
+from fastapi import FastAPI  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+from backend.routes.api import router as api_router  # noqa: E402
+from backend.routes.auth import router as auth_router  # noqa: E402
+from backend.models.models import Base  # noqa: E402
+from backend.models.db import engine  # noqa: E402
+
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure DB tables exist
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(title="AI Medical Assistant", lifespan=lifespan)
+
+# Comma-separated list of allowed origins, e.g. "http://localhost:3000,https://mediq.example.com".
+# The React app talks to the API through a same-origin proxy, so this only matters for other clients.
+cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.on_event("startup")
-def on_startup():
-    # Ensure DB tables exist
-    Base.metadata.create_all(bind=engine)
-
-
 app.include_router(api_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
 
 
 @app.get("/")
