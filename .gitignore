@@ -1,23 +1,21 @@
-#environment variables
-venv/
+# Environment (.env.example is a committed template without secrets)
 .env
-.env.example
+venv/
 
+# Python
 __pycache__/
-backend/__pycache__/
-backend/models/__pycache__/
-backend/routes/__pycache__/
-backend/services/__pycache__/
-backend/utils/__pycache__/
+*.pyc
+.pytest_cache/
 
+# Node
 node_modules/
 
-#database files
+# Database
 database/
-backend.db
 
+# Old versions saved uploaded reports here; the app no longer stores uploads
 uploads/
-dist/
-.env
 
+# React build
 frontend/build/
+dist/
