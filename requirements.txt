@@ -6,4 +6,7 @@ python-dotenv==1.2.3
 httpx==0.28.1
 pypdfium2==5.13.0
 pillow==12.3.0
+# Vector search for grounded answers. At this corpus size a brute-force dot product takes ~1ms,
+# so numpy replaces a vector database rather than adding to one. See docs/RAG.md.
+numpy==2.5.3
 pytest==9.1.1

@@ -16,7 +16,7 @@ Nginx reverse proxy
 Local model server
 
 - The app needs no API keys: models run in Ollama. Keep the Ollama port private to the backend's network.
-- Size the host for the models: `qwen3:4b-instruct` needs about 4 GB of memory and `qwen3-vl:2b-instruct` about 3 GB. A GPU greatly reduces reply times.
+- Size the host for the models: `qwen2.5:1.5b-instruct` needs about 2 GB of memory, `qwen3:4b-instruct` about 4 GB and `qwen3-vl:2b-instruct` about 3 GB. Chat keeps the fast model loaded and only loads the larger one for reports and emergencies. A GPU greatly reduces reply times.
 - Configure the models, context size and keep-alive with the `OLLAMA_*` variables in `.env.example`.
 
 Secrets management
@@ -27,11 +27,15 @@ Secrets management
 Observability and monitoring
 
 - Add structured logging and export logs to a centralized system (Cloud Logging, ELK, Datadog).
-- Export basic metrics: request latency, model latency, model failures, red-flag counts.
+- Export basic metrics: request latency, model latency, model failures, red-flag counts. For
+  red-flag messages the number to watch is time to the first streamed event, not time to the last
+  one: the first two carry the emergency warning and the first-aid steps.
 - Poll `GET /api/status` to alert when Ollama is down or a model is missing.
 
 Security
 
-- Review the safety layer in `backend/services/safety.py` and `backend/services/redflag.py` before production.
+- Review the safety layer in `backend/services/safety.py` and `backend/services/redflag.py` before
+  production. Both contain text sent to users verbatim, including the first-aid steps and the
+  emergency numbers shown for a red flag; have a clinician check them for the countries you serve.
 - Accounts use scrypt password hashes and expiring bearer tokens (`AUTH_TOKEN_DAYS`). Consider adding rate limiting on `/api/auth/login`.
 - Uploaded reports are processed in memory and never stored.

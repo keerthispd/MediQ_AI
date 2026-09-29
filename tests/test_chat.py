@@ -61,7 +61,7 @@ def test_redflag_shows_warning_then_model_answer(client, auth, fake_llm):
 
     text = reply_text(events)
     assert text.startswith("⚠️") and "**chest pain**" in text
-    assert text.endswith("\n\nModel reply.")
+    assert "\n\nModel reply." in text
     # The model is told an emergency warning was already shown
     assert "emergency symptoms (chest pain)" in fake_llm.chats[0][0]["content"]
 

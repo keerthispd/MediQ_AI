@@ -20,9 +20,10 @@ services:
     environment:
       OLLAMA_HOST: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b-instruct}
+      OLLAMA_FAST_MODEL: ${OLLAMA_FAST_MODEL:-qwen2.5:1.5b-instruct}
       OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-qwen3-vl:2b-instruct}
     entrypoint: ["/bin/sh", "-c"]
-    command: ["ollama pull \"$$OLLAMA_MODEL\" && ollama pull \"$$OLLAMA_VISION_MODEL\""]
+    command: ["ollama pull \"$$OLLAMA_FAST_MODEL\" && ollama pull \"$$OLLAMA_MODEL\" && ollama pull \"$$OLLAMA_VISION_MODEL\""]
     restart: "no"
 
   backend:
@@ -39,6 +40,10 @@ services:
     environment:
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:4b-instruct}
+      OLLAMA_FAST_MODEL: ${OLLAMA_FAST_MODEL:-qwen2.5:1.5b-instruct}
+      # Empty means "use OLLAMA_MODEL". Set it to a different model and add that model to the
+      # ollama service's pull command above, or the first emergency will wait for the download.
+      OLLAMA_EMERGENCY_MODEL: ${OLLAMA_EMERGENCY_MODEL:-}
       OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-qwen3-vl:2b-instruct}
     depends_on:
       ollama:

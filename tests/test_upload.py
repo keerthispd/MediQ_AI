@@ -139,6 +139,6 @@ def test_upload_query_goes_through_safety_checks(client, auth, fake_llm):
     assert events[0] == {"type": "meta", "blocked": True}
     assert fake_llm.chats == []
 
-    events = stream_events(upload(client, auth, "ecg.txt", b"Sinus rhythm", "I have chest pain, is this normal?"))
+    events = stream_events(upload(client, auth, "ecg.txt", b"Sinus rhythm", "I have sudden chest pain, is this normal?"))
     assert events[0] == {"type": "meta", "redflag": True}
     assert reply_text(events).startswith("⚠️")

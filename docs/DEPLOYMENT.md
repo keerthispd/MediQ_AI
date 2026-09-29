@@ -14,6 +14,7 @@ Local demo (development)
 1. Local models (Ollama)
 
 ```bash
+ollama pull qwen2.5:1.5b-instruct
 ollama pull qwen3:4b-instruct
 ollama pull qwen3-vl:2b-instruct
 ```
@@ -52,7 +53,7 @@ This starts four services:
 - `backend`: the API on port `8000`.
 - `frontend`: Nginx on port `3000`. It serves the built React app and proxies `/api/*` to the backend (config: `deploy/nginx/app.conf`).
 
-The app can be used while the models download; the chat header shows when the AI is ready. To use different models, set `OLLAMA_MODEL` and `OLLAMA_VISION_MODEL` in `.env` before starting. Both images build from the repository root.
+The app can be used while the models download; the chat header shows when the AI is ready. To use different models, set `OLLAMA_FAST_MODEL` (everyday chat), `OLLAMA_MODEL` (reports and emergencies) and `OLLAMA_VISION_MODEL` in `.env` before starting. Both images build from the repository root.
 
 The Ollama container runs on the CPU. On a machine with an NVIDIA GPU and the NVIDIA Container Toolkit, give the `ollama` service GPU access (see Ollama's Docker documentation) for much faster replies.
 
@@ -65,7 +66,7 @@ Deploying to production
 
 Security & Safety
 
-- The assistant includes a safety layer that answers self-harm messages with crisis resources, and a red-flag detector that shows an emergency warning before the answer. Review `backend/services/safety.py` and `backend/services/redflag.py` before deploying.
+- The assistant includes a safety layer that answers self-harm messages with crisis resources, and a red-flag detector that shows an emergency warning and fixed first-aid steps before the answer. Review `backend/services/safety.py` and `backend/services/redflag.py` before deploying: both reply to users in wording you ship rather than wording a model chooses, and the emergency numbers and services in them need to match where your users are.
 - Users must create an account; each user only sees their own history. Serve the app over HTTPS so passwords and tokens are encrypted in transit.
 - Uploaded reports are analyzed in memory and never written to disk.
 - Don't expose the Ollama port (`11434`) publicly; it has no authentication.

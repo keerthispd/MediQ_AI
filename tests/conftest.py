@@ -8,6 +8,12 @@ import tempfile
 _tmp_dir = tempfile.mkdtemp(prefix="mediq-tests-")
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(_tmp_dir, "test.db")
 os.environ["OLLAMA_BASE_URL"] = "http://127.0.0.1:9"
+# Startup warms the chat model; with no server to reach it would just log a warning per test
+os.environ["OLLAMA_WARMUP"] = "0"
+# Point the knowledge index at paths that do not exist, so tests never pick up a real index built
+# on the developer's machine. test_knowledge.py builds its own tiny one.
+os.environ["KNOWLEDGE_DB"] = os.path.join(_tmp_dir, "absent-knowledge.db")
+os.environ["KNOWLEDGE_VECTORS"] = os.path.join(_tmp_dir, "absent-knowledge.npy")
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -47,10 +53,14 @@ class FakeLLM:
         self.error = None
         self.transcript = "Hemoglobin 10.2 g/dL (reference 13.5-17.5)"
         self.chats = []
+        # Same calls as `chats`, with the routing the endpoint chose: which model, and how much
+        # it was allowed to write
+        self.calls = []
         self.transcribed = []
 
     def stream_chat(self, messages, model=None, max_tokens=None, keep_alive=None):
         self.chats.append(messages)
+        self.calls.append({"messages": messages, "model": model, "max_tokens": max_tokens})
         yield from self.chunks
         if self.error:
             raise llm.LLMError(self.error)

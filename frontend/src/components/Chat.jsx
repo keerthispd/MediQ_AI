@@ -6,34 +6,87 @@ const MAX_MESSAGE_CHARS = 4000;
 const HISTORY_TURNS = 10;
 const STATUS_RETRY_MS = 30000;
 
-const markdownComponents = {
-  p: ({node, ...props}) => <p style={{ margin: '0 0 10px 0' }} {...props} />,
-  ul: ({node, ...props}) => <ul style={{ margin: '0 0 10px 0', paddingLeft: '20px' }} {...props} />,
-  ol: ({node, ...props}) => <ol style={{ margin: '0 0 10px 0', paddingLeft: '20px' }} {...props} />,
-  h1: ({node, ...props}) => <h1 style={{ margin: '10px 0', fontSize: '1.2rem' }} {...props} />,
-  h2: ({node, ...props}) => <h2 style={{ margin: '10px 0', fontSize: '1.1rem' }} {...props} />,
-  h3: ({node, ...props}) => <h3 style={{ margin: '10px 0', fontSize: '1.05rem' }} {...props} />
-};
+const SUGGESTIONS = [
+  'I have a headache and mild fever.',
+  'What helps a sore throat?',
+  'Explain my blood test results.',
+];
 
-const dotStyle = { width: '8px', height: '8px', backgroundColor: '#94a3b8', borderRadius: '50%', animation: 'bounce 1.4s infinite ease-in-out both' };
+// Memoised on `text`, so a streaming reply only re-parses the message that is actually growing.
+// Without this every token re-parsed the Markdown of every message on screen.
+const MarkdownBody = React.memo(function MarkdownBody({ text }) {
+  return (
+    <div className="markdown-body">
+      <ReactMarkdown>{text}</ReactMarkdown>
+    </div>
+  );
+});
 
 function TypingIndicator({ status }) {
   return (
-    <div style={{ display: 'flex', gap: '6px', alignItems: 'center', height: '24px' }}>
-      <span style={{ ...dotStyle, animationDelay: '-0.32s' }}></span>
-      <span style={{ ...dotStyle, animationDelay: '-0.16s' }}></span>
-      <span style={dotStyle}></span>
-      {status && <span style={{ marginLeft: '6px', fontSize: '0.85rem', color: '#64748b' }}>{status}</span>}
+    <div className="typing-wrap">
+      <span className="typing" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </span>
+      <span className="typing-label">{status || 'Thinking…'}</span>
     </div>
   );
 }
 
 function describeStatus(status) {
-  if (!status) return { label: 'Checking AI…', color: '#cbd5e1', hint: '' };
-  if (!status.ollama) return { label: 'AI offline', color: '#fca5a5', hint: 'The local AI server (Ollama) is not reachable.' };
-  if (!status.model_ready) return { label: 'AI model missing', color: '#fcd34d', hint: `Install it with: ollama pull ${status.model}` };
+  if (!status) return { tone: '', label: 'Checking…', hint: '' };
+  if (!status.ollama) {
+    return { tone: 'bad', label: 'Local AI offline', hint: 'Ollama is not reachable on this machine.' };
+  }
+  // The fast model answers everyday questions and emergencies, so a missing one breaks normal chat
+  const missing = [...new Set([
+    !status.fast_ready && status.fast_model,
+    !status.emergency_ready && status.emergency_model,
+    !status.model_ready && status.model,
+  ].filter(Boolean))];
+  if (missing.length) {
+    return {
+      tone: 'warn',
+      label: 'Model missing',
+      hint: `Install with: ${missing.map((m) => `ollama pull ${m}`).join(' && ')}`,
+    };
+  }
   const vision = status.vision_ready ? '' : ` Image reports need: ollama pull ${status.vision_model}`;
-  return { label: 'Local AI ready', color: '#86efac', hint: `Model: ${status.model}.${vision}` };
+  // Emergencies use the chat model unless OLLAMA_EMERGENCY_MODEL says otherwise
+  const models = [`Chat: ${status.fast_model}`];
+  if (status.emergency_model !== status.fast_model) models.push(`Emergencies: ${status.emergency_model}`);
+  models.push(`Reports: ${status.model}`);
+  return {
+    tone: 'ok',
+    label: 'Local AI ready',
+    hint: `${models.join('. ')}.${vision}`,
+  };
+}
+
+/* Shown when the local model could not answer and replying would mean sending the question to a
+   hosted service. This is a privacy decision, so it is always the user's to make. */
+function ConsentCard({ consent, onAccept, onDecline }) {
+  return (
+    <div className="consent-card" role="alertdialog" aria-label="Use the hosted AI?">
+      <h4>⚠️ Send this question to {consent.label}?</h4>
+      <p>
+        The local AI could not answer, so nothing has been sent anywhere. Continuing would send{' '}
+        <strong>your message, and any report you uploaded, to {consent.label}</strong> over the
+        internet, where it is handled under their privacy policy and not by this machine.
+      </p>
+      <p className="consent-reason">Local AI said: {consent.reason}</p>
+      <div className="consent-actions">
+        <button type="button" className="btn btn-primary btn-sm" onClick={onAccept}>
+          Use {consent.label}
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onDecline}>
+          Keep everything local
+        </button>
+      </div>
+    </div>
+  );
 }
 
 export default function Chat({ messages, setMessages, draft, setDraft }) {
@@ -43,28 +96,56 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
   const [speakingIndex, setSpeakingIndex] = useState(null);
   const [copiedIndex, setCopiedIndex] = useState(null);
   const [aiStatus, setAiStatus] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const [atBottom, setAtBottom] = useState(true);
+  const [dragging, setDragging] = useState(false);
+  const [cloudConsent, setCloudConsent] = useState(false);
+
   const fileRef = useRef();
   const textRef = useRef(null);
-  const messagesEndRef = useRef(null);
+  const streamRef = useRef(null);
   const recognitionRef = useRef(null);
   const utteranceRef = useRef(null);
   const abortRef = useRef(null);
+  const pinnedRef = useRef(true);
+  const consentRef = useRef(false); // read inside async handlers, where state would be stale
+  const lastRequestRef = useRef(null);
   const busy = loading || uploading;
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  const toast = useCallback((text, tone = '') => {
+    const id = Date.now() + Math.random();
+    setToasts((t) => [...t, { id, text, tone }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
+  }, []);
+
+  // Stay stuck to the newest text unless the user has scrolled up to read something earlier
+  const handleScroll = () => {
+    const el = streamRef.current;
+    if (!el) return;
+    const pinned = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    pinnedRef.current = pinned;
+    setAtBottom(pinned);
   };
 
+  // Setting scrollTop directly, rather than a smooth scrollIntoView, keeps this cheap enough to run
+  // on every streamed token: smooth scrolling queued hundreds of overlapping animations per reply.
   useEffect(() => {
-    scrollToBottom();
+    const el = streamRef.current;
+    if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
   }, [messages]);
+
+  const jumpToLatest = () => {
+    const el = streamRef.current;
+    if (!el) return;
+    pinnedRef.current = true;
+    setAtBottom(true);
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  };
 
   // Stop any ongoing speech, dictation or reply if the component unmounts
   useEffect(() => {
     return () => {
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-      }
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       recognitionRef.current?.abort();
       abortRef.current?.abort();
     };
@@ -81,7 +162,9 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
   }, [refreshStatus]);
 
   // Keep checking while the model is unavailable, e.g. while it is still downloading
-  const aiReady = Boolean(aiStatus?.ollama && aiStatus?.model_ready);
+  const aiReady = Boolean(
+    aiStatus?.ollama && aiStatus?.model_ready && aiStatus?.fast_ready && aiStatus?.emergency_ready,
+  );
   const statusKnown = aiStatus !== null;
   useEffect(() => {
     if (!statusKnown || aiReady) return undefined;
@@ -96,7 +179,7 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
     }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
-      alert('Speech recognition is not supported in this browser. Please use Google Chrome or Edge.');
+      toast('Dictation needs Chrome or Edge.', 'error');
       return;
     }
     const recognition = new SpeechRecognition();
@@ -109,42 +192,63 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
       const transcript = event.results[0][0].transcript;
       setDraft((prev) => (prev ? prev + ' ' + transcript : transcript));
     };
-    recognition.onerror = (event) => {
-      console.error('Speech error', event);
-      setIsListening(false);
-    };
+    recognition.onerror = () => setIsListening(false);
     recognition.onend = () => setIsListening(false);
 
     recognitionRef.current = recognition;
     recognition.start();
   };
 
-  // Show the user's message, then stream the backend's reply into a new assistant message
-  async function streamReply(url, form, userText) {
-    setMessages((m) => [...m, { role: 'user', text: userText }, { role: 'assistant', text: '', pending: true }]);
+  /* Send a request and stream the reply into the last assistant message. `buildForm` is kept so the
+     same request can be replayed if the user agrees to the hosted model. */
+  const runRequest = useCallback(async (url, buildForm, userText, { replaceAssistant = false } = {}) => {
+    pinnedRef.current = true;
+    setAtBottom(true);
+    lastRequestRef.current = { url, buildForm, userText };
+
+    setMessages((m) => {
+      const fresh = { role: 'assistant', text: '', pending: true };
+      if (replaceAssistant) return [...m.slice(0, -1), fresh];
+      return [...m, { role: 'user', text: userText }, fresh];
+    });
+
     const updateReply = (update) => setMessages((m) => {
       const last = m[m.length - 1];
-      if (!last?.pending) return m; // the chat was cleared meanwhile
+      if (!last?.pending && !last?.consent) return m; // the chat was cleared meanwhile
       return [...m.slice(0, -1), { ...last, ...update(last) }];
     });
 
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await streamForm(url, form, (event) => {
+      await streamForm(url, buildForm(consentRef.current), (event) => {
         if (event.type === 'meta') updateReply(() => ({ redflag: event.redflag, blocked: event.blocked }));
         else if (event.type === 'status') updateReply(() => ({ status: event.text }));
         else if (event.type === 'delta') updateReply((msg) => ({ text: msg.text + event.text }));
+        else if (event.type === 'provider') updateReply(() => ({ viaCloud: true, providerLabel: event.label }));
+        else if (event.type === 'sources') updateReply(() => ({ sources: event.sources }));
+        else if (event.type === 'consent_required') {
+          updateReply(() => ({
+            pending: false,
+            status: null,
+            consent: { reason: event.reason, label: event.label || 'the hosted AI', model: event.model },
+          }));
+        }
       }, controller.signal);
-      updateReply((msg) => ({ pending: false, status: null, text: msg.text || 'No reply.' }));
+      updateReply((msg) => (msg.consent ? {} : { pending: false, status: null, text: msg.text || 'No reply.' }));
     } catch (e) {
-      if (e.name !== 'AbortError') console.error('Request failed', e);
-      updateReply(() => ({ pending: false, status: null, error: true, text: errorText(e, e.message || 'Unknown error') }));
+      if (e.name === 'AbortError') {
+        // The user stopped it on purpose: keep whatever had already arrived
+        updateReply((msg) => ({ pending: false, status: null, stopped: true, text: msg.text || 'Stopped.' }));
+      } else {
+        console.error('Request failed', e);
+        updateReply(() => ({ pending: false, status: null, error: true, text: errorText(e, e.message || 'Unknown error') }));
+      }
     } finally {
       abortRef.current = null;
     }
     refreshStatus();
-  }
+  }, [setMessages, refreshStatus]);
 
   async function send() {
     const text = (draft || '').trim();
@@ -152,37 +256,74 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
 
     // Earlier turns give the assistant context for follow-up questions (failed replies are left out)
     const history = messages
-      .filter((m) => !m.error && !m.pending)
+      .filter((m) => !m.error && !m.pending && !m.consent)
       .slice(-HISTORY_TURNS)
-      .map(({ role, text }) => ({ role, text }));
+      .map(({ role, text: t }) => ({ role, text: t }));
 
-    const form = new FormData();
-    form.append('message', text);
-    form.append('history', JSON.stringify(history));
+    const buildForm = (allowCloud) => {
+      const form = new FormData();
+      form.append('message', text);
+      form.append('history', JSON.stringify(history));
+      if (allowCloud) form.append('allow_cloud', 'true');
+      return form;
+    };
+
     setDraft('');
+    if (textRef.current) textRef.current.style.height = ''; // back to one line
     setLoading(true);
-    await streamReply('/api/chat', form, text);
+    await runRequest('/api/chat', buildForm, text);
     setLoading(false);
   }
 
-  async function uploadFile(e) {
-    const file = e.target.files[0];
+  const startUpload = useCallback(async (file) => {
     if (!file || busy) return;
-
-    // Pass the user's current draft as a query alongside the file upload
     const text = (draft || '').trim();
-    const form = new FormData();
-    form.append('file', file);
-    if (text) form.append('message', text);
+    const buildForm = (allowCloud) => {
+      const form = new FormData();
+      form.append('file', file);
+      if (text) form.append('message', text);
+      if (allowCloud) form.append('allow_cloud', 'true');
+      return form;
+    };
     setDraft('');
     setUploading(true);
-    await streamReply('/api/upload', form, `[Uploaded File: ${file.name}]` + (text ? `\nQuery: ${text}` : ''));
+    await runRequest('/api/upload', buildForm, `[Uploaded File: ${file.name}]` + (text ? `\nQuery: ${text}` : ''));
     setUploading(false);
     if (fileRef.current) fileRef.current.value = '';
-  }
+  }, [busy, draft, runRequest, setDraft]);
+
+  const acceptCloud = async () => {
+    const request = lastRequestRef.current;
+    if (!request) return;
+    consentRef.current = true;
+    setCloudConsent(true);
+    setLoading(true);
+    await runRequest(request.url, request.buildForm, request.userText, { replaceAssistant: true });
+    setLoading(false);
+  };
+
+  const declineCloud = () => {
+    setMessages((m) => {
+      const last = m[m.length - 1];
+      if (!last?.consent) return m;
+      return [...m.slice(0, -1), {
+        ...last,
+        consent: null,
+        text: 'Kept on this machine. Start Ollama, or install the missing model, and try again.',
+      }];
+    });
+  };
+
+  const revokeCloud = () => {
+    consentRef.current = false;
+    setCloudConsent(false);
+    toast('Hosted AI turned off. Replies stay on this machine.');
+  };
+
+  const stopReply = () => abortRef.current?.abort();
 
   const clearChat = () => {
-    if (window.confirm('Are you sure you want to clear the current chat?')) {
+    if (window.confirm('Clear the current chat?')) {
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       abortRef.current?.abort();
       setSpeakingIndex(null);
@@ -197,13 +338,13 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
       setCopiedIndex(index);
       setTimeout(() => setCopiedIndex(null), 2000);
     } catch (e) {
-      alert('Copying is not available here. Please select the text and copy it manually.');
+      toast('Copying is blocked here — select the text instead.', 'error');
     }
   };
 
   const handleSpeak = (text, index) => {
     if (!('speechSynthesis' in window)) {
-      alert('Text-to-speech is not supported in this browser.');
+      toast('Text-to-speech is not supported in this browser.', 'error');
       return;
     }
     window.speechSynthesis.cancel();
@@ -211,7 +352,6 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
       setSpeakingIndex(null);
       return;
     }
-
     // Remove common markdown characters so they aren't read out loud
     const cleanText = text.replace(/[#*`_~]/g, '');
     const utterance = new SpeechSynthesisUtterance(cleanText);
@@ -235,90 +375,137 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
     if (!element) return;
     // Loaded on demand: html2pdf is large and only needed when exporting
     const { default: html2pdf } = await import('html2pdf.js');
-    // Export a copy without the scroll limit so the whole conversation is captured, not just the visible part
+    // Export a copy without the scroll limit so the whole conversation is captured
     const copy = element.cloneNode(true);
     copy.style.maxHeight = 'none';
     copy.style.height = 'auto';
     copy.style.overflow = 'visible';
-    const opt = {
-      margin:       0.5,
-      filename:     `Medical_Assistant_Report_${new Date().toISOString().slice(0, 10)}.pdf`,
-      image:        { type: 'jpeg', quality: 0.98 },
-      html2canvas:  { scale: 2 },
-      jsPDF:        { unit: 'in', format: 'letter', orientation: 'portrait' }
-    };
-    html2pdf().set(opt).from(copy).save();
+    html2pdf().set({
+      margin: 0.5,
+      filename: `MediQ_Conversation_${new Date().toISOString().slice(0, 10)}.pdf`,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2 },
+      jsPDF: { unit: 'in', format: 'letter', orientation: 'portrait' },
+    }).from(copy).save();
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) startUpload(file);
   };
 
   const status = describeStatus(aiStatus);
 
   return (
-      <section className="chat-card" style={{ backgroundColor: '#ffffff', borderRadius: '16px', boxShadow: '0 10px 40px rgba(0,0,0,0.08)', border: '1px solid #e2e8f0', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
-        <div className="chat-header" style={{ padding: '24px', background: 'linear-gradient(135deg, #0369a1 0%, #0f766e 100%)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <h2 style={{ margin: 0, fontSize: '1.4rem', color: '#ffffff', fontWeight: '700', letterSpacing: '0.5px' }}>MediQ AI</h2>
-          <p style={{ margin: '6px 0 0', fontSize: '0.95rem', color: '#ccfbf1' }}>Empowering your health with smart insights</p>
-          <span title={status.hint} style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', marginTop: '10px', padding: '3px 10px', borderRadius: '999px', backgroundColor: 'rgba(255,255,255,0.15)', color: '#ffffff', fontSize: '0.8rem', cursor: 'help' }}>
-            <span style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: status.color }}></span>
-            {status.label}
-          </span>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button onClick={downloadPDF} disabled={messages.length === 0} style={{ padding: '8px 12px', borderRadius: '6px', border: 'none', backgroundColor: 'rgba(255,255,255,0.2)', color: '#ffffff', cursor: messages.length === 0 ? 'not-allowed' : 'pointer', opacity: messages.length === 0 ? 0.6 : 1, fontWeight: '600', fontSize: '0.85rem', transition: 'background 0.2s' }} onMouseEnter={e => e.target.style.backgroundColor='rgba(255,255,255,0.3)'} onMouseLeave={e => e.target.style.backgroundColor='rgba(255,255,255,0.2)'}>📄 Export PDF</button>
-          <button onClick={clearChat} style={{ padding: '8px 12px', borderRadius: '6px', border: 'none', backgroundColor: 'rgba(239, 68, 68, 0.8)', color: '#ffffff', cursor: 'pointer', fontWeight: '600', fontSize: '0.85rem', transition: 'background 0.2s' }} onMouseEnter={e => e.target.style.backgroundColor='rgba(239, 68, 68, 1)'} onMouseLeave={e => e.target.style.backgroundColor='rgba(239, 68, 68, 0.8)'}>🗑️ Clear Chat</button>
-        </div>
-      </div>
-
-      <div className="message-stream" aria-live="polite" style={{ padding: '24px', flex: 1, overflowY: 'auto', minHeight: '450px', backgroundColor: '#f8fafc' }}>
-        {messages.length === 0 && (
-          <div className="empty-state" style={{ textAlign: 'center', padding: '40px 20px', backgroundColor: '#ffffff', borderRadius: '12px', border: '1px solid #e2e8f0', boxShadow: '0 4px 15px rgba(0,0,0,0.03)', color: '#0f172a', margin: '40px auto', maxWidth: '80%' }}>
-            <div style={{ fontSize: '3rem', marginBottom: '16px' }}>🩺</div>
-            <strong style={{ fontSize: '1.15rem', color: '#0369a1', display: 'block', marginBottom: '10px' }}>Welcome to MediQ AI</strong>
-            <p style={{ maxWidth: '400px', margin: '0 auto', color: '#64748b', lineHeight: '1.6', fontSize: '0.95rem' }}>
-              Describe your symptoms, ask general health questions, or securely upload a medical report for an educational summary.
-            </p>
-          </div>
+    <section className="card chat-card">
+      <header className="chat-header">
+        <h2>Consultation</h2>
+        <span className={`status-chip ${status.tone}`} title={status.hint}>
+          <span className="status-dot" />
+          {status.label}
+        </span>
+        {cloudConsent && (
+          <button type="button" className="badge badge-cloud" onClick={revokeCloud} title="Stop using the hosted AI">
+            ☁️ Hosted AI on — turn off
+          </button>
         )}
+        <button type="button" className="btn btn-ghost btn-sm" onClick={downloadPDF} disabled={messages.length === 0}>
+          Export
+        </button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={clearChat} disabled={messages.length === 0}>
+          Clear
+        </button>
+      </header>
 
-        {messages.map((m, i) => (
-          <div key={i} className={`message-row ${m.role === 'user' ? 'user' : 'assistant'}`} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start', marginBottom: '16px' }}>
-            <div className="message-bubble" style={{ background: m.role === 'user' ? 'linear-gradient(135deg, #0ea5e9 0%, #14b8a6 100%)' : '#ffffff', color: m.role === 'user' ? '#ffffff' : '#1e293b', padding: '16px 20px', borderRadius: m.role === 'user' ? '16px 16px 0 16px' : '16px 16px 16px 0', maxWidth: '85%', boxShadow: m.role === 'user' ? '0 4px 15px rgba(14, 165, 233, 0.2)' : '0 4px 15px rgba(0,0,0,0.05)', border: m.role === 'assistant' ? '1px solid #e2e8f0' : 'none' }}>
-              <div className="message-meta" style={{ fontSize: '0.8rem', marginBottom: '4px', opacity: 0.8, display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <strong>{m.role === 'user' ? 'You' : 'Assistant'}</strong>
-                {m.blocked && <span className="badge badge-danger" style={{ backgroundColor: '#ef4444', color: '#fff', padding: '2px 6px', borderRadius: '4px' }}>Blocked</span>}
-                {m.redflag && <span className="badge badge-warning" style={{ backgroundColor: '#f59e0b', color: '#fff', padding: '2px 6px', borderRadius: '4px' }}>Red flag</span>}
+      <div className="chat-body">
+        <div className="message-stream" ref={streamRef} onScroll={handleScroll} aria-live="polite">
+          {messages.length === 0 && (
+            <div className="empty-state">
+              <div className="empty-icon" aria-hidden="true">🩺</div>
+              <h3>How can I help today?</h3>
+              <p>
+                Describe your symptoms, ask a general health question, or upload a medical report
+                for a plain-language summary.
+              </p>
+              <div className="suggestions">
+                {SUGGESTIONS.map((s) => (
+                  <button key={s} type="button" className="chip" onClick={() => setDraft(s)}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
-                {m.role === 'assistant' && !m.pending && (
-                  <div data-html2canvas-ignore="true" style={{ display: 'flex', gap: '8px', marginLeft: 'auto' }}>
-                    <button onClick={() => handleSpeak(m.text, i)} title="Read aloud" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1rem', padding: '2px', opacity: 0.7, transition: 'opacity 0.2s' }} onMouseEnter={e => e.target.style.opacity = 1} onMouseLeave={e => e.target.style.opacity = 0.7}>
-                      {speakingIndex === i ? '⏹️' : '🔊'}
-                    </button>
-                    <button onClick={() => handleCopy(m.text, i)} title="Copy to clipboard" style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '1rem', padding: '2px', opacity: 0.7, transition: 'opacity 0.2s' }} onMouseEnter={e => e.target.style.opacity = 1} onMouseLeave={e => e.target.style.opacity = 0.7}>
-                      {copiedIndex === i ? '✅' : '📋'}
-                    </button>
+          {messages.map((m, i) => (
+            <div key={i} className={`message-row ${m.role === 'user' ? 'user' : 'assistant'}${m.error ? ' error' : ''}`}>
+              <div className="message-meta">
+                <span>{m.role === 'user' ? 'You' : 'MediQ'}</span>
+                {m.blocked && <span className="badge badge-danger">Blocked</span>}
+                {m.redflag && <span className="badge badge-warning">Red flag</span>}
+                {m.stopped && <span className="badge badge-neutral">Stopped</span>}
+                {m.viaCloud && <span className="badge badge-cloud">via {m.providerLabel}</span>}
+              </div>
+
+              <div className="message-bubble">
+                {/* Shown as soon as retrieval finishes, which is well before the first word of the
+                    answer: the wait then has something to read. */}
+                {m.sources?.length > 0 && (
+                  <div className="sources">
+                    <span className="sources-label">Based on</span>
+                    <ol className="sources-list">
+                      {m.sources.map((s, n) => (
+                        <li key={s.url}>
+                          <a href={s.url} target="_blank" rel="noopener noreferrer">
+                            <span className="source-num">{n + 1}</span>{s.title}
+                          </a>
+                          <span className="source-org">{s.source}</span>
+                        </li>
+                      ))}
+                    </ol>
                   </div>
                 )}
+                {m.pending && !m.text ? <TypingIndicator status={m.status} /> : <MarkdownBody text={m.text} />}
+                {m.consent && (
+                  <ConsentCard consent={m.consent} onAccept={acceptCloud} onDecline={declineCloud} />
+                )}
               </div>
-              {m.pending && !m.text ? (
-                <TypingIndicator status={m.status} />
-              ) : (
-                <div className="markdown-body" style={{ margin: 0, lineHeight: '1.6', fontSize: '0.95rem' }}>
-                  <ReactMarkdown components={markdownComponents}>{m.text}</ReactMarkdown>
+
+              {m.role === 'assistant' && !m.pending && m.text && (
+                <div className="message-actions" data-html2canvas-ignore="true">
+                  <button type="button" className="icon-btn" onClick={() => handleSpeak(m.text, i)} aria-label="Read aloud">
+                    {speakingIndex === i ? '⏹️' : '🔊'}
+                  </button>
+                  <button type="button" className="icon-btn" onClick={() => handleCopy(m.text, i)} aria-label="Copy reply">
+                    {copiedIndex === i ? '✅' : '📋'}
+                  </button>
                 </div>
               )}
             </div>
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
+          ))}
+        </div>
+
+        {!atBottom && messages.length > 0 && (
+          <button type="button" className="btn btn-ghost btn-sm jump-latest" onClick={jumpToLatest}>
+            ↓ Latest
+          </button>
+        )}
       </div>
 
-      <div className="composer-panel" style={{ padding: '20px 24px', borderTop: '1px solid #e2e8f0', backgroundColor: '#ffffff' }}>
-        <div className="composer-row" style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+      <div className="composer-panel">
+        <div className="composer-row">
           <textarea
             id="message-input"
             ref={textRef}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              // Grow with the text instead of hiding longer questions behind a one-line scroll
+              e.target.style.height = 'auto';
+              e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`;
+            }}
             onKeyDown={(e) => {
               // Enter sends, Shift+Enter adds a new line (ignored while an IME is composing text)
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -326,32 +513,68 @@ export default function Chat({ messages, setMessages, draft, setDraft }) {
                 send();
               }
             }}
-            placeholder="Describe symptoms, ask about a report, or request next steps..."
+            placeholder="Describe your symptoms or ask a health question…"
             maxLength={MAX_MESSAGE_CHARS}
             rows={1}
-            style={{ flex: 1, padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', resize: 'none', fontFamily: 'inherit', fontSize: '0.9rem', minHeight: '42px', height: '42px', boxSizing: 'border-box' }}
+            aria-label="Your message"
           />
-          <button type="button" onClick={startListening} title={isListening ? 'Stop dictation' : 'Dictate with your voice'} style={{ background: isListening ? '#fee2e2' : '#f8fafc', color: isListening ? '#ef4444' : '#64748b', width: '42px', height: '42px', padding: '0', borderRadius: '8px', border: `1px solid ${isListening ? '#fca5a5' : '#cbd5e1'}`, cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.2rem', boxShadow: isListening ? '0 0 0 4px rgba(239, 68, 68, 0.1)' : 'none', boxSizing: 'border-box' }}>
+          <button
+            type="button"
+            className={`btn btn-ghost btn-icon${isListening ? ' is-active' : ''}`}
+            onClick={startListening}
+            aria-label={isListening ? 'Stop dictation' : 'Dictate your message'}
+          >
             {isListening ? '🔴' : '🎤'}
           </button>
-          <button className="primary-button" onClick={send} disabled={busy} type="button" style={{ background: 'linear-gradient(135deg, #0ea5e9 0%, #14b8a6 100%)', color: '#fff', height: '42px', padding: '0 20px', borderRadius: '8px', border: 'none', cursor: busy ? 'not-allowed' : 'pointer', fontWeight: '600', transition: 'all 0.2s', opacity: busy ? 0.7 : 1, boxShadow: '0 4px 10px rgba(14,165,233,0.2)', fontSize: '0.9rem', boxSizing: 'border-box' }}>
-            {loading ? 'Replying…' : 'Send'}
-          </button>
+          {busy ? (
+            <button type="button" className="btn btn-danger" onClick={stopReply}>
+              ■ Stop
+            </button>
+          ) : (
+            <button type="button" className="btn btn-primary" onClick={send} disabled={!draft.trim()}>
+              Send
+            </button>
+          )}
         </div>
 
-        <div className="upload-panel" style={{ marginTop: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '16px 20px', backgroundColor: '#f0fdfa', border: '1px dashed #5eead4', borderRadius: '12px' }}>
+        <div className="composer-hint">
+          <span>{draft.length > MAX_MESSAGE_CHARS - 500 ? `${draft.length} / ${MAX_MESSAGE_CHARS}` : ''}</span>
+          <span className="hint-keys">
+            <kbd>Enter</kbd> to send · <kbd>Shift</kbd>+<kbd>Enter</kbd> for a new line
+          </span>
+        </div>
+
+        <div
+          className={`upload-panel${dragging ? ' dragging' : ''}`}
+          onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={onDrop}
+        >
           <div>
-            <strong style={{ fontSize: '0.9rem', color: '#0f172a' }}>Upload Medical Report</strong>
-            <p style={{ margin: 0, fontSize: '0.8rem', color: '#64748b' }}>PDF, image or text file, up to 20 MB. Analyzed privately by the local AI and not stored. Remove PII before upload.</p>
+            <strong>Upload a medical report</strong>
+            <p>Drag a file here, or choose one. PDF, image or text, up to 20&nbsp;MB. Analysed on this machine and not stored. Remove personal details first.</p>
           </div>
-          <div className="upload-row" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <label className="upload-label" style={{ cursor: busy ? 'not-allowed' : 'pointer', backgroundColor: '#ffffff', padding: '10px 18px', borderRadius: '8px', fontSize: '0.9rem', fontWeight: '600', color: '#0f766e', border: '1px solid #99f6e4', boxShadow: '0 2px 4px rgba(0,0,0,0.02)', transition: 'all 0.2s' }}>
-              {uploading ? 'Analyzing…' : 'Choose File'}
-              <input type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt" onChange={uploadFile} ref={fileRef} disabled={busy} style={{ display: 'none' }} />
-            </label>
-          </div>
+          <label className="btn btn-ghost upload-label">
+            {uploading ? 'Analysing…' : 'Choose file'}
+            <input
+              type="file"
+              accept=".pdf,.png,.jpg,.jpeg,.webp,.txt"
+              onChange={(e) => startUpload(e.target.files[0])}
+              ref={fileRef}
+              disabled={busy}
+              hidden
+            />
+          </label>
         </div>
       </div>
+
+      {toasts.length > 0 && (
+        <div className="toast-stack">
+          {toasts.map((t) => (
+            <div key={t.id} className={`toast ${t.tone}`} role="status">{t.text}</div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
