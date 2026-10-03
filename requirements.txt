@@ -8,5 +8,7 @@ pypdfium2==5.13.0
 pillow==12.3.0
 # Vector search for grounded answers. At this corpus size a brute-force dot product takes ~1ms,
 # so numpy replaces a vector database rather than adding to one. See docs/RAG.md.
-numpy==2.5.3
+# Held at 2.4.x: numpy 2.5 requires Python 3.12, and this project supports 3.11+ - both CI and
+# the backend image run 3.11. Only basic array ops are used here, stable across both versions.
+numpy==2.4.6
 pytest==9.1.1
